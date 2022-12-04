@@ -49,9 +49,24 @@ pip3 install tqdm seaborn
 
 ## Usage
 
+Run `detect.py` with options below :
+
+- `--source` - focusing on end with "**camerasrc**" to refer to input from GStreamer.
+- `--device` - GPU channel, ex. 0, 1, ...
+- `--weights` - your model file path.
+- `--img-size` - inference size, ex. 640, 416, ...
+- `--onboard` - camera port on Jetson board.
+- `--view-img` - debug on screen.
+
 ```sh
 cd ${HOME}/project/jetson-nano-gstreamer-yolov7
-
+python3 ./detect.py \
+--source nvarguscamerasrc \
+--device 0 \
+--weights YOUR_MODEL_NAME.pt \
+--img-size INFERENCE_SIZE \
+--onboard 0 \
+--view-img
 ```
 
 ## References
