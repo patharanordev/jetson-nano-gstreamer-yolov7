@@ -1,25 +1,29 @@
 import argparse
 import time
+import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from numpy import random
 
 from models.experimental import attempt_load
-from utils.datasets import LoadStreams, LoadImages
+from utils.datasets import LoadStreams, LoadImages, letterbox
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
 from utils.plots import plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_synchronized, TracedModel
-
+from utils.camera import add_camera_args, Camera
+import subprocess
 
 def detect(save_img=False):
     source, weights, view_img, save_txt, imgsz, trace = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace
     save_img = not opt.nosave and not source.endswith('.txt')  # save inference images
     webcam = source.isnumeric() or source.endswith('.txt') or source.lower().startswith(
         ('rtsp://', 'rtmp://', 'http://', 'https://'))
+    gstreamer = source.endswith('camerasrc')
 
     # Directories
     save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
@@ -47,120 +51,239 @@ def detect(save_img=False):
         modelc = load_classifier(name='resnet101', n=2)  # initialize
         modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()
 
-    # Set Dataloader
-    vid_path, vid_writer = None, None
-    if webcam:
-        view_img = check_imshow()
-        cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride)
-    else:
-        dataset = LoadImages(source, img_size=imgsz, stride=stride)
+    if gstreamer:
+        # Get names and colors
+        names = model.module.names if hasattr(model, 'module') else model.names
+        colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+    
+        # Run inference
+        if device.type != 'cpu':
+            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+        old_img_w = old_img_h = imgsz
+        old_img_b = 1
 
-    # Get names and colors
-    names = model.module.names if hasattr(model, 'module') else model.names
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+        cudnn.benchmark = True
 
-    # Run inference
-    if device.type != 'cpu':
-        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-    old_img_w = old_img_h = imgsz
-    old_img_b = 1
+        t0 = time.time()
 
-    t0 = time.time()
-    for path, img, im0s, vid_cap in dataset:
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
+        win_name = 'on board camera'
+        cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
+        cam = Camera(opt)
+        if not cam.isOpened():
+            raise SystemExit('Error: fail to open camera.')
+        
+        fps = 0.0
+        # tic = time.time()
+        while True:
+            im0 = cam.read()
+            if im0 is None:
+                break
 
-        # Warmup
-        if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
-            old_img_b = img.shape[0]
-            old_img_h = img.shape[2]
-            old_img_w = img.shape[3]
-            for i in range(3):
-                model(img, augment=opt.augment)[0]
 
-        # Inference
-        t1 = time_synchronized()
-        with torch.no_grad():   # Calculating gradients would cause a GPU memory leak
-            pred = model(img, augment=opt.augment)[0]
-        t2 = time_synchronized()
 
-        # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
-        t3 = time_synchronized()
 
-        # Apply Classifier
-        if classify:
-            pred = apply_classifier(pred, modelc, img, im0s)
 
-        # Process detections
-        for i, det in enumerate(pred):  # detections per image
-            if webcam:  # batch_size >= 1
-                p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(), dataset.count
-            else:
-                p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
+            # Padded resize
+            # To prevent context of object lost when resie from rectangle to square
+            img = letterbox(im0, opt.img_size, stride=32)[0]
 
-            p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # img.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            if len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+            # Convert
+            img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+            img = np.ascontiguousarray(img)
 
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
-
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf) if opt.save_conf else (cls, *xywh)  # label format
-                        with open(txt_path + '.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
-
-                    if save_img or view_img:  # Add bbox to image
+            img = torch.from_numpy(img).to(device)
+            img = img.half() if half else img.float()  # uint8 to fp16/32
+            img /= 255.0  # 0 - 255 to 0.0 - 1.0
+            if img.ndimension() == 3:
+                img = img.unsqueeze(0)
+    
+            # Warmup
+            if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
+                old_img_b = img.shape[0]
+                old_img_h = img.shape[2]
+                old_img_w = img.shape[3]
+                for i in range(3):
+                    model(img, augment=opt.augment)[0]
+            print(img.shape)
+            # Inference
+            t1 = time_synchronized()
+            with torch.no_grad():   # Calculating gradients would cause a GPU memory leak
+                pred = model(img, augment=opt.augment)[0]
+            t2 = time_synchronized()
+            print(pred)
+            # Apply NMS
+            pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+            t3 = time_synchronized()
+            print(pred)
+            # Apply Classifier
+            if classify:
+                pred = apply_classifier(pred, modelc, img, im0)
+            print(pred)
+            # Process detections
+            for i, det in enumerate(pred):  # detections per image
+                gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+                print(f'Detected {len(det)}-object(s) ({det})')
+                if len(det):
+                    # Rescale boxes from img_size to im0 size
+                    det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+    
+                    # # Print results
+                    # for c in det[:, -1].unique():
+                    #     n = (det[:, -1] == c).sum()  # detections per class
+    
+                    # Write results
+                    for *xyxy, conf, cls in reversed(det):
                         label = f'{names[int(cls)]} {conf:.2f}'
                         plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=1)
+                        # tl = 2 #line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness
+                        # color = colors[int(cls)] or [random.randint(0, 255) for _ in range(3)]
+                        # c1, c2 = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
+                        # print((c1, c2))
+                        # cv2.rectangle(im0, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+                        # if label:
+                        #     tf = max(tl - 1, 1)  # font thickness
+                        #     t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
+                        #     c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
+                        #     cv2.rectangle(im0, c1, c2, color, -1, cv2.LINE_AA)  # filled
+                        #     cv2.putText(im0, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+                        print(f' - {label}')
+            
+                    # cv2.imshow(win_name, im0)
+    
+                # Print time (inference + NMS)
+                print(f'Done. ({(1E3 * (t2 - t1)):.1f}ms) Inference, ({(1E3 * (t3 - t2)):.1f}ms) NMS')
 
-            # Print time (inference + NMS)
-            print(f'{s}Done. ({(1E3 * (t2 - t1)):.1f}ms) Inference, ({(1E3 * (t3 - t2)):.1f}ms) NMS')
 
-            # Stream results
-            if view_img:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
 
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
-                    print(f" The image with the result is saved in: {save_path}")
-                else:  # 'video' or 'stream'
-                    if vid_path != save_path:  # new video
-                        vid_path = save_path
-                        if isinstance(vid_writer, cv2.VideoWriter):
-                            vid_writer.release()  # release previous video writer
-                        if vid_cap:  # video
-                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path += '.mp4'
-                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer.write(im0)
+            cv2.imshow(win_name, im0)
 
-    if save_txt or save_img:
-        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
-        #print(f"Results saved to {save_dir}{s}")
 
-    print(f'Done. ({time.time() - t0:.3f}s)')
+            if cv2.waitKey(1) & 0xFF == ord('e'):
+                break 
+ 
+        # Using cv2.destroyAllWindows() to destroy
+        # all created windows open on screen
+        cv2.destroyAllWindows()
+        
+        # Stop camera threading
+        cam.release()
+
+    else:
+        # Set Dataloader
+        vid_path, vid_writer = None, None
+        if webcam:
+            view_img = check_imshow()
+            cudnn.benchmark = True  # set True to speed up constant image size inference
+            dataset = LoadStreams(source, img_size=imgsz, stride=stride)
+        else:
+            dataset = LoadImages(source, img_size=imgsz, stride=stride)
+    
+        # Get names and colors
+        names = model.module.names if hasattr(model, 'module') else model.names
+        colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+    
+        # Run inference
+        if device.type != 'cpu':
+            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+        old_img_w = old_img_h = imgsz
+        old_img_b = 1
+    
+        t0 = time.time()
+        for path, img, im0s, vid_cap in dataset:
+            img = torch.from_numpy(img).to(device)
+            img = img.half() if half else img.float()  # uint8 to fp16/32
+            img /= 255.0  # 0 - 255 to 0.0 - 1.0
+            if img.ndimension() == 3:
+                img = img.unsqueeze(0)
+    
+            # Warmup
+            if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
+                old_img_b = img.shape[0]
+                old_img_h = img.shape[2]
+                old_img_w = img.shape[3]
+                for i in range(3):
+                    model(img, augment=opt.augment)[0]
+    
+            # Inference
+            t1 = time_synchronized()
+            with torch.no_grad():   # Calculating gradients would cause a GPU memory leak
+                pred = model(img, augment=opt.augment)[0]
+            t2 = time_synchronized()
+    
+            # Apply NMS
+            pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+            t3 = time_synchronized()
+    
+            # Apply Classifier
+            if classify:
+                pred = apply_classifier(pred, modelc, img, im0s)
+    
+            # Process detections
+            for i, det in enumerate(pred):  # detections per image
+                if webcam:  # batch_size >= 1
+                    p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(), dataset.count
+                else:
+                    p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
+    
+                p = Path(p)  # to Path
+                save_path = str(save_dir / p.name)  # img.jpg
+                txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+                gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+                if len(det):
+                    # Rescale boxes from img_size to im0 size
+                    det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+    
+                    # Print results
+                    for c in det[:, -1].unique():
+                        n = (det[:, -1] == c).sum()  # detections per class
+                        s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+    
+                    # Write results
+                    for *xyxy, conf, cls in reversed(det):
+                        if save_txt:  # Write to file
+                            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                            line = (cls, *xywh, conf) if opt.save_conf else (cls, *xywh)  # label format
+                            with open(txt_path + '.txt', 'a') as f:
+                                f.write(('%g ' * len(line)).rstrip() % line + '\n')
+    
+                        if save_img or view_img:  # Add bbox to image
+                            label = f'{names[int(cls)]} {conf:.2f}'
+                            plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=1)
+    
+                # Print time (inference + NMS)
+                print(f'{s}Done. ({(1E3 * (t2 - t1)):.1f}ms) Inference, ({(1E3 * (t3 - t2)):.1f}ms) NMS')
+    
+                # Stream results
+                if view_img:
+                    cv2.imshow(str(p), im0)
+                    cv2.waitKey(1)  # 1 millisecond
+    
+                # Save results (image with detections)
+                if save_img:
+                    if dataset.mode == 'image':
+                        cv2.imwrite(save_path, im0)
+                        print(f" The image with the result is saved in: {save_path}")
+                    else:  # 'video' or 'stream'
+                        if vid_path != save_path:  # new video
+                            vid_path = save_path
+                            # if isinstance(vid_writer, cv2.VideoWriter):
+                            if isinstance(vid_writer, type(cv2.VideoWriter)):
+                                vid_writer.release()  # release previous video writer
+                            if vid_cap:  # video
+                                fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            else:  # stream
+                                fps, w, h = 30, im0.shape[1], im0.shape[0]
+                                save_path += '.mp4'
+                            vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                        vid_writer.write(im0)
+    
+        if save_txt or save_img:
+            s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
+            #print(f"Results saved to {save_dir}{s}")
+    
+        print(f'Done. ({time.time() - t0:.3f}s)')
 
 
 if __name__ == '__main__':
@@ -183,6 +306,38 @@ if __name__ == '__main__':
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
+    
+    parser.add_argument('--image', type=str, default=None,
+                        help='image file name, e.g. dog.jpg')
+    parser.add_argument('--video', type=str, default=None,
+                        help='video file name, e.g. traffic.mp4')
+    parser.add_argument('--video_looping', action='store_true',
+                        help='loop around the video file [False]')
+    parser.add_argument('--rtsp', type=str, default=None,
+                        help=('RTSP H.264 stream, e.g. '
+                              'rtsp://admin:123456@192.168.1.64:554'))
+    parser.add_argument('--rtsp_latency', type=int, default=200,
+                        help='RTSP latency in ms [200]')
+    parser.add_argument('--usb', type=int, default=None,
+                        help='USB webcam device id (/dev/video?) [None]')
+    parser.add_argument('--gstr', type=str, default=None,
+                        help='GStreamer string [None]')
+    parser.add_argument('--onboard', type=int, default=None,
+                        help='Jetson onboard camera [None]')
+    parser.add_argument('--copy_frame', action='store_true',
+                        help=('copy video frame internally [False]'))
+    parser.add_argument('--do_resize', action='store_true',
+                        help=('resize image/video [False]'))
+    parser.add_argument('--width', type=int, default=640,
+                        help='image width [640]')
+    parser.add_argument('--height', type=int, default=480,
+                        help='image height [480]')
+    
+#         --onboard 0 \
+# -m yolov4-tiny-product_category-416 \
+# --category_num 5 \
+# --display
+    
     opt = parser.parse_args()
     print(opt)
     #check_requirements(exclude=('pycocotools', 'thop'))
