@@ -32,6 +32,7 @@ YOLOv7 requires `torch`, to support Jetson Nano :
     ```sh
     wget https://github.com/patharanordev/jetson-nano-gstreamer-yolov7/releases/download/torch-jetson-nano/torchvision-0.11.0a0+fa347eb-cp36-cp36m-linux_aarch64.whl \
     -O ${HOME}/Downloads/torchvision-0.11.0a0+fa347eb-cp36-cp36m-linux_aarch64.whl
+    pip3 install ${HOME}/Downloads/torchvision-0.11.0a0+fa347eb-cp36-cp36m-linux_aarch64.whl
     ```
 
 ### YOLOv7 repo
@@ -68,6 +69,73 @@ python3 ./detect.py \
 --onboard 0 \
 --view-img
 ```
+
+Example
+
+```sh
+$ python3 ./detect.py --source nvarguscamerasrc --device 0 --weights ../yolov7/yolov7-tiny-custom-best.pt --img-size 416 --onboard 0 --view-img
+Namespace(agnostic_nms=False, augment=False, classes=None, conf_thres=0.25, copy_frame=False, device='0', do_resize=False, exist_ok=False, gstr=None, height=480, image=None, img_size=416, iou_thres=0.45, name='exp', no_trace=False, nosave=False, onboard=0, project='runs/detect', rtsp=None, rtsp_latency=200, save_conf=False, save_txt=False, source='nvarguscamerasrc', update=False, usb=None, video=None, video_looping=False, view_img=True, weights=['../yolov7/yolov7-tiny-custom-best.pt'], width=640)
+YOLOR 🚀 torch-jetson-nano-4-gec7a7dd torch 1.10.0a0+git36449ea CUDA:0 (NVIDIA Tegra X1, 3956.18359375MB)
+
+Fusing layers... 
+IDetect.fuse
+Model Summary: 208 layers, 6018420 parameters, 0 gradients
+ Convert model to Traced-model... 
+ traced_script_module saved! 
+ model is traced! 
+
+/home/smart/.local/lib/python3.6/site-packages/torch/functional.py:445: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at  ../aten/src/ATen/native/TensorShape.cpp:2157.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+Camera: using Jetson onboard camera
+GST_ARGUS: Creating output stream
+CONSUMER: Waiting until producer is connected...
+GST_ARGUS: Available Sensor modes :
+GST_ARGUS: 3264 x 2464 FR = 21.000000 fps Duration = 47619048 ; Analog Gain range min 1.000000, max 10.625000; Exposure Range min 13000, max 683709000;
+
+GST_ARGUS: 3264 x 1848 FR = 28.000001 fps Duration = 35714284 ; Analog Gain range min 1.000000, max 10.625000; Exposure Range min 13000, max 683709000;
+
+GST_ARGUS: 1920 x 1080 FR = 29.999999 fps Duration = 33333334 ; Analog Gain range min 1.000000, max 10.625000; Exposure Range min 13000, max 683709000;
+
+GST_ARGUS: 1640 x 1232 FR = 29.999999 fps Duration = 33333334 ; Analog Gain range min 1.000000, max 10.625000; Exposure Range min 13000, max 683709000;
+
+GST_ARGUS: 1280 x 720 FR = 59.999999 fps Duration = 16666667 ; Analog Gain range min 1.000000, max 10.625000; Exposure Range min 13000, max 683709000;
+
+GST_ARGUS: 1280 x 720 FR = 120.000005 fps Duration = 8333333 ; Analog Gain range min 1.000000, max 10.625000; Exposure Range min 13000, max 683709000;
+
+GST_ARGUS: Running with following settings:
+   Camera index = 0 
+   Camera mode  = 5 
+   Output Stream W = 1280 H = 720 
+   seconds to Run    = 0 
+   Frame Rate = 120.000005 
+GST_ARGUS: Setup Complete, Starting captures for 0 seconds
+GST_ARGUS: Starting repeat capture requests.
+CONSUMER: Producer has connected; continuing.
+[ WARN:0] global /home/nvidia/host/build_opencv/nv_opencv/modules/videoio/src/cap_gstreamer.cpp (933) open OpenCV | GStreamer warning: Cannot query video position: status=0, value=-1, duration=-1
+...
+```
+
+To close debug window, please press '**e**' button :
+
+```sh
+...
+CONSUMER: Done Success
+GST_ARGUS: Cleaning up
+GST_ARGUS: Done Success
+$
+```
+
+## Issue(s)
+
+### Error: fail to open camera.
+
+Please try to refresh camera :
+
+```sh
+sudo systemctl restart nvargus-daemon
+```
+
+then run `detect.py` again.
 
 ## References
 
