@@ -54,6 +54,15 @@ def butter_lowpass_filtfilt(data, cutoff=1500, fs=50000, order=5):
     return filtfilt(b, a, data)  # forward-backward filter
 
 
+def show_fps(img, fps):
+    fontsize = max(round(max(img.size) / 40), 12)
+    font = ImageFont.truetype("Arial.ttf", fontsize)
+    line = cv2.LINE_AA
+    fps_text = 'FPS: {:.2f}'.format(fps)
+    cv2.putText(img, fps_text, (11, 20), font, 1.0, (32, 32, 32), 4, line)
+    cv2.putText(img, fps_text, (10, 20), font, 1.0, (240, 240, 240), 1, line)
+
+
 def plot_one_box(x, img, color=None, label=None, line_thickness=3):
     # Plots one bounding box on image img
     tl = line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness

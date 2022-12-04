@@ -13,7 +13,7 @@ from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages, letterbox
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
-from utils.plots import plot_one_box
+from utils.plots import plot_one_box, show_fps
 from utils.torch_utils import select_device, load_classifier, time_synchronized, TracedModel
 from utils.camera import add_camera_args, Camera
 import subprocess
@@ -51,20 +51,19 @@ def detect(save_img=False):
         modelc = load_classifier(name='resnet101', n=2)  # initialize
         modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()
 
+    # Get names and colors
+    names = model.module.names if hasattr(model, 'module') else model.names
+    colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+
+    # Run inference
+    if device.type != 'cpu':
+        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+    old_img_w = old_img_h = imgsz
+    old_img_b = 1
+
     if gstreamer:
-        # Get names and colors
-        names = model.module.names if hasattr(model, 'module') else model.names
-        colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
-    
-        # Run inference
-        if device.type != 'cpu':
-            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-        old_img_w = old_img_h = imgsz
-        old_img_b = 1
 
         cudnn.benchmark = True
-
-        t0 = time.time()
 
         win_name = 'on board camera'
         cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
@@ -73,21 +72,19 @@ def detect(save_img=False):
             raise SystemExit('Error: fail to open camera.')
         
         fps = 0.0
-        # tic = time.time()
+        t0 = time.time()
+        tic = time.time()
+
         while True:
             im0 = cam.read()
             if im0 is None:
                 break
 
-
-
-
-
             # Padded resize
             # To prevent context of object lost when resie from rectangle to square
             img = letterbox(im0, opt.img_size, stride=32)[0]
 
-            # Convert
+            # Convert to RGB
             img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
             img = np.ascontiguousarray(img)
 
@@ -97,66 +94,52 @@ def detect(save_img=False):
             if img.ndimension() == 3:
                 img = img.unsqueeze(0)
     
-            # Warmup
+            # Warmup 
+            # Ref. https://github.com/WongKinYiu/yolov7/issues/298
             if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
                 old_img_b = img.shape[0]
                 old_img_h = img.shape[2]
                 old_img_w = img.shape[3]
                 for i in range(3):
                     model(img, augment=opt.augment)[0]
-            print(img.shape)
+            
             # Inference
             t1 = time_synchronized()
             with torch.no_grad():   # Calculating gradients would cause a GPU memory leak
                 pred = model(img, augment=opt.augment)[0]
             t2 = time_synchronized()
-            print(pred)
+            
             # Apply NMS
             pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
             t3 = time_synchronized()
-            print(pred)
+            
             # Apply Classifier
             if classify:
                 pred = apply_classifier(pred, modelc, img, im0)
-            print(pred)
+            
             # Process detections
             for i, det in enumerate(pred):  # detections per image
                 gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-                print(f'Detected {len(det)}-object(s) ({det})')
+                # print(f'Detected {len(det)}-object(s)')
                 if len(det):
                     # Rescale boxes from img_size to im0 size
                     det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-    
-                    # # Print results
-                    # for c in det[:, -1].unique():
-                    #     n = (det[:, -1] == c).sum()  # detections per class
-    
+
                     # Write results
                     for *xyxy, conf, cls in reversed(det):
                         label = f'{names[int(cls)]} {conf:.2f}'
                         plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=1)
-                        # tl = 2 #line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness
-                        # color = colors[int(cls)] or [random.randint(0, 255) for _ in range(3)]
-                        # c1, c2 = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
-                        # print((c1, c2))
-                        # cv2.rectangle(im0, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
-                        # if label:
-                        #     tf = max(tl - 1, 1)  # font thickness
-                        #     t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
-                        #     c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
-                        #     cv2.rectangle(im0, c1, c2, color, -1, cv2.LINE_AA)  # filled
-                        #     cv2.putText(im0, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
-                        print(f' - {label}')
-            
-                    # cv2.imshow(win_name, im0)
+                        # print(f' - {label}')
     
-                # Print time (inference + NMS)
-                print(f'Done. ({(1E3 * (t2 - t1)):.1f}ms) Inference, ({(1E3 * (t3 - t2)):.1f}ms) NMS')
+                # print(f'Done. ({(1E3 * (t2 - t1)):.1f}ms) Inference, ({(1E3 * (t3 - t2)):.1f}ms) NMS')
 
-
-
+            show_fps(im0, fps)
             cv2.imshow(win_name, im0)
 
+            toc = time.time()
+            curr_fps = 1.0 / (toc-tic)
+            fps = curr_fps if fps == 0.0 else (fps*0.95 + curr_fps*0.05)
+            tic = toc
 
             if cv2.waitKey(1) & 0xFF == ord('e'):
                 break 
@@ -169,6 +152,7 @@ def detect(save_img=False):
         cam.release()
 
     else:
+
         # Set Dataloader
         vid_path, vid_writer = None, None
         if webcam:
@@ -288,6 +272,8 @@ def detect(save_img=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+
+    # YOLOv7 options
     parser.add_argument('--weights', nargs='+', type=str, default='yolov7.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
@@ -307,36 +293,19 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
     
-    parser.add_argument('--image', type=str, default=None,
-                        help='image file name, e.g. dog.jpg')
-    parser.add_argument('--video', type=str, default=None,
-                        help='video file name, e.g. traffic.mp4')
-    parser.add_argument('--video_looping', action='store_true',
-                        help='loop around the video file [False]')
-    parser.add_argument('--rtsp', type=str, default=None,
-                        help=('RTSP H.264 stream, e.g. '
-                              'rtsp://admin:123456@192.168.1.64:554'))
-    parser.add_argument('--rtsp_latency', type=int, default=200,
-                        help='RTSP latency in ms [200]')
-    parser.add_argument('--usb', type=int, default=None,
-                        help='USB webcam device id (/dev/video?) [None]')
-    parser.add_argument('--gstr', type=str, default=None,
-                        help='GStreamer string [None]')
-    parser.add_argument('--onboard', type=int, default=None,
-                        help='Jetson onboard camera [None]')
-    parser.add_argument('--copy_frame', action='store_true',
-                        help=('copy video frame internally [False]'))
-    parser.add_argument('--do_resize', action='store_true',
-                        help=('resize image/video [False]'))
-    parser.add_argument('--width', type=int, default=640,
-                        help='image width [640]')
-    parser.add_argument('--height', type=int, default=480,
-                        help='image height [480]')
-    
-#         --onboard 0 \
-# -m yolov4-tiny-product_category-416 \
-# --category_num 5 \
-# --display
+    # Camera options
+    parser.add_argument('--image', type=str, default=None, help='image file name, e.g. dog.jpg')
+    parser.add_argument('--video', type=str, default=None, help='video file name, e.g. traffic.mp4')
+    parser.add_argument('--video_looping', action='store_true', help='loop around the video file [False]')
+    parser.add_argument('--rtsp', type=str, default=None, help='RTSP H.264 stream, e.g. rtsp://admin:123456@192.168.1.64:554')
+    parser.add_argument('--rtsp_latency', type=int, default=200, help='RTSP latency in ms [200]')
+    parser.add_argument('--usb', type=int, default=None, help='USB webcam device id (/dev/video?) [None]')
+    parser.add_argument('--gstr', type=str, default=None, help='GStreamer string [None]')
+    parser.add_argument('--onboard', type=int, default=None, help='Jetson onboard camera [None]')
+    parser.add_argument('--copy_frame', action='store_true', help=('copy video frame internally [False]'))
+    parser.add_argument('--do_resize', action='store_true', help=('resize image/video [False]'))
+    parser.add_argument('--width', type=int, default=640, help='image width [640]')
+    parser.add_argument('--height', type=int, default=480, help='image height [480]')
     
     opt = parser.parse_args()
     print(opt)
