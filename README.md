@@ -85,6 +85,7 @@ YOLOv7 requires `torch`, to support Jetson Nano :
 - prerequisite
 
     ```sh
+    sudo apt-get install -y libjpeg-dev libopenblas-dev libopenmpi-dev libomp-dev
     pip3 install typing-extensions==3.6.2.1
     pip3 install typing-extensions --upgrade
     ```
